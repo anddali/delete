@@ -306,12 +306,11 @@ async def _log_query(
     """Log query for analytics."""
     try:
         log = QueryLog(
-            api_token_id=token.token_id,
-            query=request.query,
+            token_id=token.token_id,
+            query_text=request.query,
             sliding_window=request.sliding_window,
-            source_ids=[str(s) for s in (request.source_ids or [])],
-            result_count=result_count,
-            search_time_ms=search_time_ms,
+            results_count=result_count,
+            latency_ms=int(search_time_ms),
         )
         db.add(log)
         await db.commit()

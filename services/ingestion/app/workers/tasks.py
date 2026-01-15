@@ -318,61 +318,89 @@ async def _process_uploaded_document_async(source_id: str, document_id: str):
                 logger.error("Source not found", source_id=source_id)
                 return {"success": False, "error": "Source not found"}
             
-            # Get chunking config
-            chunking_config = get_chunking_config(source.config)
-            
-            # Delete existing chunks if any (re-processing)
-            await db.execute(
-                delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
+            # Create ingestion job for tracking
+            job = IngestionJob(
+                source_id=UUID(source_id),
+                type="incremental",
+                status="running",
+                started_at=datetime.utcnow(),
+                progress={"document_id": document_id},
             )
+            db.add(job)
+            await db.flush()
             
-            # Chunk the document content
-            chunks = chunk_document(
-                content=doc.content,
-                chunk_size_chars=chunking_config["chunk_size_chars"],
-                respect_boundaries=chunking_config["respect_boundaries"],
-                min_chunk_size_chars=chunking_config["min_chunk_size_chars"],
-                metadata={"source_id": source_id, "document_id": document_id},
-            )
-            
-            if not chunks:
-                logger.warning("No chunks created", document_id=document_id)
-                return {"success": True, "chunks_created": 0}
-            
-            # Generate embeddings in batch
-            chunk_texts = [c.content for c in chunks]
-            embeddings = await generate_embeddings(chunk_texts)
-            
-            # Create chunk records
-            for chunk, embedding in zip(chunks, embeddings):
-                chunk_record = DocumentChunk(
-                    document_id=doc.id,
-                    content=chunk.content,
-                    embedding=embedding,
-                    position=chunk.position,
-                    char_start=chunk.char_start,
-                    char_end=chunk.char_end,
-                    char_count=chunk.char_count,
-                    chunk_metadata=chunk.metadata,
+            try:
+                # Get chunking config
+                chunking_config = get_chunking_config(source.config)
+                
+                # Delete existing chunks if any (re-processing)
+                await db.execute(
+                    delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
                 )
-                db.add(chunk_record)
+                
+                # Chunk the document content
+                chunks = chunk_document(
+                    content=doc.content,
+                    chunk_size_chars=chunking_config["chunk_size_chars"],
+                    respect_boundaries=chunking_config["respect_boundaries"],
+                    min_chunk_size_chars=chunking_config["min_chunk_size_chars"],
+                    metadata={"source_id": source_id, "document_id": document_id},
+                )
+                
+                if not chunks:
+                    logger.warning("No chunks created", document_id=document_id)
+                    job.status = "completed"
+                    job.result = {"documents_processed": 1, "chunks_created": 0}
+                    job.completed_at = datetime.utcnow()
+                    await db.commit()
+                    return {"success": True, "chunks_created": 0}
+                
+                # Generate embeddings in batch
+                chunk_texts = [c.content for c in chunks]
+                embeddings = await generate_embeddings(chunk_texts)
+                
+                # Create chunk records
+                for chunk, embedding in zip(chunks, embeddings):
+                    chunk_record = DocumentChunk(
+                        document_id=doc.id,
+                        content=chunk.content,
+                        embedding=embedding,
+                        position=chunk.position,
+                        char_start=chunk.char_start,
+                        char_end=chunk.char_end,
+                        char_count=chunk.char_count,
+                        chunk_metadata=chunk.metadata,
+                    )
+                    db.add(chunk_record)
+                
+                # Update source chunk count
+                source.chunk_count = (source.chunk_count or 0) + len(chunks)
+                
+                # Update job as completed
+                job.status = "completed"
+                job.result = {"documents_processed": 1, "chunks_created": len(chunks)}
+                job.completed_at = datetime.utcnow()
+                
+                await db.commit()
+                
+                logger.info(
+                    "Document processed",
+                    document_id=document_id,
+                    chunks_created=len(chunks),
+                )
+                
+                return {
+                    "success": True,
+                    "document_id": document_id,
+                    "chunks_created": len(chunks),
+                }
             
-            # Update source chunk count
-            source.chunk_count = (source.chunk_count or 0) + len(chunks)
-            
-            await db.commit()
-            
-            logger.info(
-                "Document processed",
-                document_id=document_id,
-                chunks_created=len(chunks),
-            )
-            
-            return {
-                "success": True,
-                "document_id": document_id,
-                "chunks_created": len(chunks),
-            }
+            except Exception as e:
+                job.status = "failed"
+                job.error = str(e)
+                job.completed_at = datetime.utcnow()
+                await db.commit()
+                raise
     
     except Exception as e:
         logger.error(

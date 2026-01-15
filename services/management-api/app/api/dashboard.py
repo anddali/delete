@@ -8,7 +8,7 @@ from typing import List
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.auth import get_current_user, AdminUser
@@ -70,7 +70,7 @@ async def get_system_stats(
     sources_result = await db.execute(
         select(
             func.count(Source.id).label("total"),
-            func.sum(func.cast(Source.is_active, type_=int)).label("active"),
+            func.sum(func.cast(Source.is_active, Integer)).label("active"),
         )
     )
     sources_row = sources_result.one()
@@ -87,7 +87,7 @@ async def get_system_stats(
     tokens_result = await db.execute(
         select(
             func.count(APIToken.id).label("total"),
-            func.sum(func.cast(APIToken.is_active, type_=int)).label("active"),
+            func.sum(func.cast(APIToken.is_active, Integer)).label("active"),
         )
     )
     tokens_row = tokens_result.one()
@@ -97,7 +97,7 @@ async def get_system_stats(
         select(
             func.count(IngestionJob.id).label("total"),
             func.sum(
-                func.cast(IngestionJob.status == "failed", type_=int)
+                func.cast(IngestionJob.status == "failed", Integer)
             ).label("failed"),
         ).where(IngestionJob.created_at >= today_start)
     )
