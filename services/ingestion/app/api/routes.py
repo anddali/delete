@@ -13,9 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.workers.celery_app import celery_app
-from app.workers.tasks import ingest_source
+from app.workers.tasks import ingest_source, process_uploaded_document
 from shared.database.connection import get_db_session
-from shared.database.models import IngestionJob, Source
+from shared.database.models import IngestionJob, Source, Document
 from shared.schemas import TriggerIngestionRequest, JobResponse, JobProgress, JobResult
 
 logger = structlog.get_logger()
@@ -151,6 +151,55 @@ async def cancel_job(
     logger.info("Job cancelled", job_id=str(job_id))
     
     return {"message": "Job cancelled", "job_id": str(job_id)}
+
+
+@router.post("/process-document")
+async def process_document_endpoint(
+    request: dict,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Process a single uploaded document (chunk + embed).
+    
+    Called by Management API after file upload.
+    The document should already have its content parsed and stored.
+    """
+    source_id = request.get("source_id")
+    document_id = request.get("document_id")
+    
+    if not source_id or not document_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_id and document_id are required",
+        )
+    
+    # Verify document exists
+    result = await db.execute(
+        select(Document).where(Document.id == UUID(document_id))
+    )
+    doc = result.scalar_one_or_none()
+    
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document not found: {document_id}",
+        )
+    
+    # Queue the processing task
+    task = process_uploaded_document.delay(source_id, document_id)
+    
+    logger.info(
+        "Document processing triggered",
+        document_id=document_id,
+        source_id=source_id,
+        task_id=task.id,
+    )
+    
+    return {
+        "message": "Document processing started",
+        "document_id": document_id,
+        "task_id": task.id,
+    }
 
 
 @router.get("/sources/{source_id}/stats")

@@ -1,9 +1,11 @@
 # Ingestion Service - Requirements & Features
 
 ## Overview
+
 High-performance document ingestion service with plugin-based architecture for processing and indexing documents from multiple sources. Optimized for throughput and extensibility.
 
 ## Core Responsibilities
+
 - Fetch documents from external sources via plugins
 - Parse and chunk documents for optimal retrieval
 - Generate embeddings using OpenAI API
@@ -12,6 +14,7 @@ High-performance document ingestion service with plugin-based architecture for p
 - Handle incremental updates efficiently
 
 ## Technology Stack
+
 - **Runtime**: Python 3.11+
 - **Framework**: FastAPI (async/await)
 - **Task Queue**: Celery 5.3+
@@ -23,6 +26,7 @@ High-performance document ingestion service with plugin-based architecture for p
 ## Performance Requirements
 
 ### Throughput Targets
+
 - **Initial Ingestion**: Process 1000+ documents/minute
 - **Embedding Generation**: Batch 100 embeddings in single API call
 - **Concurrent Workers**: Support 5-10 parallel workers
@@ -30,6 +34,7 @@ High-performance document ingestion service with plugin-based architecture for p
 - **Change Detection**: <5 minutes for detecting updates
 
 ### Optimization Strategies
+
 - Async I/O for all external API calls
 - Batch processing for embeddings (reduce API overhead)
 - Connection pooling for database and Redis
@@ -40,6 +45,7 @@ High-performance document ingestion service with plugin-based architecture for p
 ## API Endpoints
 
 ### Ingestion Control
+
 ```
 POST   /api/v1/ingest/trigger
   - Body: {source_id: uuid, full_sync: bool}
@@ -57,6 +63,7 @@ GET    /api/v1/ingest/sources/{source_id}/stats
 ```
 
 ### Health & Monitoring
+
 ```
 GET    /health
   - Database connectivity
@@ -72,48 +79,50 @@ GET    /metrics
 ## Plugin Architecture
 
 ### Base Plugin Interface
+
 ```python
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, Dict, Any
 
 class BaseIntegrationPlugin(ABC):
     """Base class for all integration plugins"""
-    
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.rate_limiter = self._setup_rate_limiter()
-    
+
     @abstractmethod
     async def validate_config(self) -> bool:
         """Validate configuration and credentials"""
         pass
-    
+
     @abstractmethod
     async def fetch_initial(self) -> AsyncIterator[Document]:
         """Fetch all documents for initial sync"""
         pass
-    
+
     @abstractmethod
     async def fetch_updates(self, since: datetime) -> AsyncIterator[Document]:
         """Fetch documents modified since timestamp"""
         pass
-    
+
     @abstractmethod
     async def parse_content(self, raw_content: Any) -> str:
         """Parse raw content into plain text"""
         pass
-    
+
     @abstractmethod
     def get_metadata(self, raw_doc: Any) -> Dict[str, Any]:
         """Extract metadata from document"""
         pass
-    
+
     async def check_health(self) -> bool:
         """Check if integration is accessible"""
         pass
 ```
 
 ### Plugin Registry
+
 ```python
 # services/ingestion/app/plugins/__init__.py
 
@@ -135,6 +144,7 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 ### 1. Confluence Plugin
 
 **Features**:
+
 - Space-level synchronization
 - Page hierarchy preservation
 - Attachment indexing
@@ -142,6 +152,7 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 - HTML to markdown conversion
 
 **Configuration**:
+
 ```json
 {
   "type": "confluence",
@@ -165,12 +176,14 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 ```
 
 **Performance Optimizations**:
+
 - Paginated API calls (100 pages per request)
 - Parallel page content fetching
 - CQL queries for modified pages only
 - Checksum-based change detection
 
 **API Methods**:
+
 - `GET /rest/api/content` - List pages
 - `GET /rest/api/content/{id}?expand=body.storage,version` - Get content
 - `GET /rest/api/content/search?cql=lastModified>=...` - Find updates
@@ -178,6 +191,7 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 ### 2. Slack Plugin
 
 **Features**:
+
 - Channel-based synchronization
 - Thread preservation
 - User mention resolution
@@ -185,6 +199,7 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 - Reaction and reply metadata
 
 **Configuration**:
+
 ```json
 {
   "type": "slack",
@@ -208,12 +223,14 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 ```
 
 **Performance Optimizations**:
+
 - Conversations API with cursor pagination
 - Bulk message fetching (200 per request)
 - Timestamp-based incremental sync
 - Parallel channel processing
 
 **API Methods**:
+
 - `conversations.history` - Get messages
 - `conversations.replies` - Get thread replies
 - `users.info` - Resolve user names
@@ -221,25 +238,60 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 ### 3. File Upload Plugin
 
 **Features**:
-- Support for multiple file types (PDF, DOCX, TXT, MD, HTML)
+
+- Support for multiple file types (PDF, DOCX, TXT, MD, HTML, JSON, CSV, XML)
 - Batch upload processing
 - Automatic file type detection
 - Text extraction from binary formats
-- S3-compatible storage
+- Local file storage (simplified architecture)
+
+**Architecture**:
+
+```
+Upload Flow:
+┌─────────────┐     ┌──────────────────┐     ┌───────────────────┐
+│  Admin UI   │────▶│  Management API  │────▶│ Ingestion Service │
+│  (Upload)   │     │  (Parse + Store) │     │ (Chunk + Embed)   │
+└─────────────┘     └──────────────────┘     └───────────────────┘
+                           │                          │
+                           ▼                          ▼
+                    ┌─────────────┐           ┌─────────────┐
+                    │ Local Disk  │           │  PostgreSQL │
+                    │ /app/uploads│           │  (pgvector) │
+                    └─────────────┘           └─────────────┘
+```
+
+1. **Management API** handles upload:
+
+   - Receives file via multipart form
+   - Parses content using file-type-specific parsers
+   - Saves original file to local disk (`/app/uploads/{source_id}/`)
+   - Creates Document record with parsed text content
+   - Triggers Ingestion Service to chunk and embed
+
+2. **Ingestion Service** processes document:
+   - Receives document ID via `/ingest/process-document`
+   - Chunks the parsed text content
+   - Generates embeddings via OpenAI API
+   - Stores chunks with embeddings in PostgreSQL
 
 **Configuration**:
+
 ```json
 {
   "type": "file_upload",
-  "storage": {
-    "type": "s3",
-    "bucket": "rag-knowledge-uploads",
-    "region": "us-east-1"
-  },
   "processing": {
     "max_file_size_mb": 100,
-    "allowed_extensions": [".pdf", ".docx", ".txt", ".md"],
-    "ocr_enabled": false
+    "allowed_extensions": [
+      ".pdf",
+      ".docx",
+      ".txt",
+      ".md",
+      ".html",
+      ".json",
+      ".csv",
+      ".xml"
+    ]
   },
   "chunking": {
     "chunk_size_chars": 1200,
@@ -249,29 +301,55 @@ def get_plugin(source_type: str, config: dict) -> BaseIntegrationPlugin:
 }
 ```
 
-**Performance Optimizations**:
-- Streaming file reads (avoid memory issues)
-- Parallel file processing
-- Incremental uploads to S3
-- Content hash deduplication
+**File Parsers** (in Management API):
 
-**File Processors**:
-- PDF: PyPDF2 or pdfplumber (faster)
-- DOCX: python-docx
+- **PDF**: pdfplumber (fast, accurate text extraction)
+- **DOCX**: python-docx (paragraphs + tables)
+- **HTML**: BeautifulSoup with lxml (removes scripts/styles)
+- **TXT/MD**: Direct UTF-8 read with fallback encodings
+- **JSON**: Recursive text extraction from structure
+- **CSV**: Row-by-row with header labels
+- **XML**: Element text extraction
+
+**API Endpoints**:
+
+```
+POST /sources/{source_id}/upload
+  - Single file upload
+  - Parses content, stores document, triggers processing
+  - Returns: document_id, filename, size, text_length
+
+POST /sources/{source_id}/upload-multiple
+  - Multiple file upload
+  - Same processing per file
+  - Returns: uploaded[], errors[], totals
+
+POST /ingest/process-document (Ingestion Service)
+  - Chunks and embeds a parsed document
+  - Called by Management API after upload
+  - Body: {source_id, document_id}
+```
+
+**Performance Optimizations**:
+
+- Streaming file reads (avoid memory issues)
+- Parallel file processing for batch uploads
+- Content hash deduplication
 - HTML: BeautifulSoup with lxml parser
 - TXT/MD: Direct read
 
 ## Document Processing Pipeline
 
 ### 1. Content Extraction
+
 ```python
 async def extract_content(plugin: BaseIntegrationPlugin, raw_doc: Any) -> Document:
     # Parse content to plain text
     content = await plugin.parse_content(raw_doc)
-    
+
     # Extract metadata
     metadata = plugin.get_metadata(raw_doc)
-    
+
     # Create document object
     return Document(
         source_id=metadata['source_id'],
@@ -288,23 +366,26 @@ async def extract_content(plugin: BaseIntegrationPlugin, raw_doc: Any) -> Docume
 ### 2. Chunking Strategy
 
 **Algorithm**: Sequential Character-Based Chunking (No Overlap)
+
 - Configurable chunk size per source (character count)
 - No overlap during chunking (overlap handled at query time via sliding window)
 - Preserves natural boundaries when possible (paragraphs, sentences)
 - Sequential position tracking for adjacent chunk retrieval
 
 **Configurable Parameters** (per source):
+
 - `chunk_size_chars`: Character count per chunk (default: 1000, range: 500-4000)
 - `respect_boundaries`: Try to break at sentence/paragraph boundaries (default: true)
 - `min_chunk_size_chars`: Minimum chunk size (default: 200)
 
 **Implementation**:
+
 ```python
 from typing import List
 import re
 
 def chunk_document(
-    content: str, 
+    content: str,
     metadata: dict,
     chunk_size_chars: int = 1000,
     respect_boundaries: bool = True
@@ -313,11 +394,11 @@ def chunk_document(
     chunks = []
     position = 0
     chunk_index = 0
-    
+
     while position < len(content):
         # Calculate end position
         end_position = min(position + chunk_size_chars, len(content))
-        
+
         # Try to respect boundaries if enabled
         if respect_boundaries and end_position < len(content):
             # Look for paragraph break first
@@ -334,10 +415,10 @@ def chunk_document(
                 )
                 if sentence_break > position + (chunk_size_chars * 0.7):
                     end_position = sentence_break + 2
-        
+
         # Extract chunk
         chunk_text = content[position:end_position].strip()
-        
+
         if len(chunk_text) > 0:
             chunks.append(Chunk(
                 content=chunk_text,
@@ -346,19 +427,20 @@ def chunk_document(
                 char_end=end_position,
                 char_count=len(chunk_text),
                 metadata={
-                    **metadata, 
+                    **metadata,
                     'chunk_position': chunk_index,
                     'total_chars': len(content)
                 }
             ))
             chunk_index += 1
-        
+
         position = end_position
-    
+
     return chunks
 ```
 
 **Benefits**:
+
 - No duplicate content across chunks (more efficient storage)
 - Configurable per source type (technical docs might need larger chunks)
 - Adjacent chunks retrieved via sliding window at query time
@@ -367,11 +449,12 @@ def chunk_document(
 
 **Database Storage**:
 Chunks store sequential position to enable efficient adjacent chunk retrieval:
+
 ```sql
 -- Retrieve chunk with sliding window
-SELECT * FROM document_chunks 
-WHERE document_id = $1 
-AND position BETWEEN $chunk_position - $window_size 
+SELECT * FROM document_chunks
+WHERE document_id = $1
+AND position BETWEEN $chunk_position - $window_size
                  AND $chunk_position + $window_size
 ORDER BY position;
 ```
@@ -379,23 +462,25 @@ ORDER BY position;
 ### 3. Embedding Generation
 
 **Provider**: OpenAI `text-embedding-3-small` (1536 dimensions)
+
 - Cost effective: $0.02 per 1M tokens
 - Fast: ~3000 embeddings/sec
 - High quality for retrieval
 
 **Batch Processing**:
+
 ```python
 async def generate_embeddings_batch(chunks: List[str]) -> List[List[float]]:
     """Generate embeddings in batches for efficiency"""
-    
+
     # OpenAI supports up to 2048 inputs per request
     batch_size = 100
     all_embeddings = []
-    
+
     async with httpx.AsyncClient() as client:
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
-            
+
             response = await client.post(
                 "https://api.openai.com/v1/embeddings",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
@@ -405,15 +490,16 @@ async def generate_embeddings_batch(chunks: List[str]) -> List[List[float]]:
                 },
                 timeout=30.0
             )
-            
+
             data = response.json()
             embeddings = [item['embedding'] for item in data['data']]
             all_embeddings.extend(embeddings)
-    
+
     return all_embeddings
 ```
 
 **Error Handling**:
+
 - Retry with exponential backoff (3 attempts)
 - Rate limit handling (429 errors)
 - Fallback to smaller batches on timeout
@@ -422,6 +508,7 @@ async def generate_embeddings_batch(chunks: List[str]) -> List[List[float]]:
 ### 4. Storage
 
 **Database Operations**:
+
 ```python
 async def store_document_with_chunks(
     db: AsyncSession,
@@ -430,14 +517,14 @@ async def store_document_with_chunks(
     embeddings: List[List[float]]
 ):
     """Store document, chunks, and embeddings atomically"""
-    
+
     async with db.begin():
         # Insert document
         doc_result = await db.execute(
             insert(documents).values(**document.dict()).returning(documents.c.id)
         )
         doc_id = doc_result.scalar_one()
-        
+
         # Prepare bulk insert for chunks and embeddings
         chunk_values = []
         for chunk, embedding in zip(chunks, embeddings):
@@ -449,7 +536,7 @@ async def store_document_with_chunks(
                 'token_count': chunk.token_count,
                 'metadata': chunk.metadata
             })
-        
+
         # Bulk insert (much faster than individual inserts)
         await db.execute(insert(document_chunks).values(chunk_values))
 ```
@@ -470,7 +557,7 @@ celery_app = Celery('ingestion')
 
 class CallbackTask(Task):
     """Base task with error handling and retry logic"""
-    
+
     autoretry_for = (Exception,)
     retry_kwargs = {'max_retries': 3}
     retry_backoff = True
@@ -480,39 +567,39 @@ class CallbackTask(Task):
 @celery_app.task(bind=True, base=CallbackTask)
 async def ingest_source(self, source_id: str, full_sync: bool = False):
     """Main ingestion task"""
-    
+
     # Update job status to 'running'
     await update_job_status(self.request.id, 'running')
-    
+
     try:
         # Get source configuration
         source = await get_source(source_id)
         plugin = get_plugin(source.type, source.config)
-        
+
         # Fetch documents
         if full_sync:
             docs = plugin.fetch_initial()
         else:
             last_sync = source.last_sync_at or datetime.min
             docs = plugin.fetch_updates(since=last_sync)
-        
+
         # Process documents
         processed = 0
         async for doc in docs:
             await process_document(doc, plugin)
             processed += 1
-            
+
             # Update progress every 10 documents
             if processed % 10 == 0:
                 self.update_state(
                     state='PROGRESS',
                     meta={'processed': processed}
                 )
-        
+
         # Update source last_sync_at
         await update_source_sync_time(source_id)
         await update_job_status(self.request.id, 'completed', processed)
-        
+
     except Exception as e:
         await update_job_status(self.request.id, 'failed', error=str(e))
         raise
@@ -520,20 +607,20 @@ async def ingest_source(self, source_id: str, full_sync: bool = False):
 @celery_app.task
 async def process_document(doc: Document, plugin: BaseIntegrationPlugin):
     """Process single document: chunk, embed, store"""
-    
+
     # Check if document already exists and hasn't changed
     existing = await get_document_by_external_id(doc.external_id)
     if existing and existing.checksum == doc.checksum:
         return  # Skip unchanged document
-    
+
     # Extract and chunk content
     content = await plugin.parse_content(doc.raw_content)
     chunks = chunk_document(content, doc.metadata)
-    
+
     # Generate embeddings
     chunk_texts = [c.content for c in chunks]
     embeddings = await generate_embeddings_batch(chunk_texts)
-    
+
     # Store in database
     await store_document_with_chunks(doc, chunks, embeddings)
 
@@ -610,11 +697,12 @@ task_reject_on_worker_lost = True
 ## Error Handling & Resilience
 
 ### Retry Strategy
+
 ```python
 class RetryConfig:
     max_retries = 3
     retry_delays = [1, 5, 15]  # seconds
-    
+
     @staticmethod
     async def execute_with_retry(func, *args, **kwargs):
         for attempt in range(RetryConfig.max_retries):
@@ -627,24 +715,25 @@ class RetryConfig:
 ```
 
 ### Circuit Breaker
+
 ```python
 class CircuitBreaker:
     """Prevent cascading failures to external services"""
-    
+
     def __init__(self, failure_threshold=5, timeout=60):
         self.failure_count = 0
         self.failure_threshold = failure_threshold
         self.timeout = timeout
         self.last_failure_time = None
         self.state = 'closed'  # closed, open, half_open
-    
+
     async def call(self, func, *args, **kwargs):
         if self.state == 'open':
             if time.time() - self.last_failure_time > self.timeout:
                 self.state = 'half_open'
             else:
                 raise CircuitBreakerOpen()
-        
+
         try:
             result = await func(*args, **kwargs)
             self.on_success()
@@ -655,25 +744,26 @@ class CircuitBreaker:
 ```
 
 ### Rate Limiting
+
 ```python
 class RateLimiter:
     """Token bucket rate limiter"""
-    
+
     def __init__(self, rate: int, per: int):
         self.rate = rate  # tokens
         self.per = per  # seconds
         self.allowance = rate
         self.last_check = time.time()
-    
+
     async def acquire(self):
         current = time.time()
         time_passed = current - self.last_check
         self.last_check = current
-        
+
         self.allowance += time_passed * (self.rate / self.per)
         if self.allowance > self.rate:
             self.allowance = self.rate
-        
+
         if self.allowance < 1.0:
             sleep_time = (1.0 - self.allowance) * (self.per / self.rate)
             await asyncio.sleep(sleep_time)
@@ -685,6 +775,7 @@ class RateLimiter:
 ## Monitoring & Observability
 
 ### Logging
+
 ```python
 import structlog
 
@@ -701,6 +792,7 @@ logger.info(
 ```
 
 ### Metrics
+
 ```python
 from prometheus_client import Counter, Histogram, Gauge
 
@@ -736,18 +828,21 @@ documents_processed.labels(
 ## Testing Strategy
 
 ### Unit Tests
+
 - Plugin interface compliance
 - Chunking algorithm correctness
 - Embedding batch processing
 - Error handling and retries
 
 ### Integration Tests
+
 - Database operations
 - Redis queue operations
 - External API mocking
 - End-to-end ingestion flow
 
 ### Performance Tests
+
 - Throughput benchmarks
 - Concurrent processing load
 - Memory usage profiling
@@ -756,6 +851,7 @@ documents_processed.labels(
 ## Configuration Management
 
 ### Environment Variables
+
 ```bash
 # Database
 DATABASE_URL=postgresql+asyncpg://user:pass@localhost/ragdb
@@ -783,6 +879,7 @@ SENTRY_DSN=https://...
 ```
 
 ## File Structure
+
 ```
 services/ingestion/
 ├── Dockerfile
@@ -828,6 +925,7 @@ services/ingestion/
 ```
 
 ## Dependencies
+
 ```
 # Core
 fastapi==0.109.0

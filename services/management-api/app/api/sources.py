@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.services.auth import get_current_user, require_role, AdminUser
+from app.services.parsing import parse_file, get_supported_extensions
 from shared.database.connection import get_db
 from shared.database.models import Source, Document, DocumentChunk, IngestionJob, AuditLog
 from shared.utils.security import encrypt_credentials
@@ -471,7 +472,7 @@ async def test_connection(
 
 
 # Allowed file extensions for upload
-ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".doc", ".html", ".json", ".csv", ".xml"}
+ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".html", ".htm", ".json", ".csv", ".xml"}
 
 
 class FileUploadResponse(BaseModel):
@@ -479,7 +480,34 @@ class FileUploadResponse(BaseModel):
     document_id: UUID
     filename: str
     size: int
+    text_length: int
     message: str
+
+
+async def trigger_document_processing(source_id: UUID, document_id: UUID):
+    """Trigger the ingestion service to process an uploaded document."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.INGESTION_SERVICE_URL}/api/v1/ingest/process-document",
+                json={
+                    "source_id": str(source_id),
+                    "document_id": str(document_id),
+                },
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                logger.info("Document processing triggered", document_id=str(document_id))
+                return response.json()
+            else:
+                logger.warning(
+                    "Failed to trigger document processing",
+                    document_id=str(document_id),
+                    status=response.status_code,
+                )
+    except Exception as e:
+        logger.error("Error triggering document processing", error=str(e))
+    return None
 
 
 @router.post("/{source_id}/upload", response_model=FileUploadResponse)
@@ -489,7 +517,7 @@ async def upload_file(
     current_user: AdminUser = Depends(require_role(["admin", "operator"])),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload a file to a file_upload source."""
+    """Upload a file to a file_upload source. Parses content and triggers processing."""
     # Get source
     result = await db.execute(
         select(Source).where(Source.id == source_id)
@@ -532,29 +560,46 @@ async def upload_file(
     unique_filename = f"{uuid_mod.uuid4()}{ext}"
     file_path = os.path.join(source_upload_dir, unique_filename)
     
-    # Save file and read content
-    file_size = 0
-    file_content = b""
+    # Read file content
+    file_content = await file.read()
+    file_size = len(file_content)
+    
+    # Save file to disk
     async with aiofiles.open(file_path, 'wb') as f:
-        while chunk := await file.read(1024 * 1024):  # 1MB chunks
-            await f.write(chunk)
-            file_content += chunk
-            file_size += len(chunk)
+        await f.write(file_content)
     
-    # Try to decode content as text
+    # Parse file to extract text
     try:
-        text_content = file_content.decode('utf-8')
-    except UnicodeDecodeError:
-        text_content = f"[Binary file: {filename}]"
+        text_content = parse_file(file_content, filename)
+    except ValueError as e:
+        # Clean up file if parsing fails
+        os.remove(file_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error("Failed to parse file", filename=filename, error=str(e))
+        # Clean up file if parsing fails
+        os.remove(file_path)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse file: {str(e)}",
+        )
     
-    # Create document record
+    # Create document record with parsed content
     doc = Document(
         source_id=source_id,
         external_id=unique_filename,
         title=filename,
         content=text_content,
         url=file_path,
-        doc_metadata={"original_filename": filename, "size": file_size, "content_type": file.content_type or "application/octet-stream"},
+        doc_metadata={
+            "original_filename": filename,
+            "size": file_size,
+            "text_length": len(text_content),
+            "content_type": file.content_type or "application/octet-stream",
+        },
     )
     db.add(doc)
     
@@ -573,20 +618,30 @@ async def upload_file(
         resource_type="document",
         resource_id=doc.id,
         resource_name=filename,
-        changes={"source_id": str(source_id), "size": file_size},
+        changes={"source_id": str(source_id), "size": file_size, "text_length": len(text_content)},
     )
     db.add(audit)
     
     await db.commit()
     await db.refresh(doc)
     
-    logger.info("File uploaded", document_id=str(doc.id), filename=filename, size=file_size)
+    logger.info(
+        "File uploaded and parsed",
+        document_id=str(doc.id),
+        filename=filename,
+        size=file_size,
+        text_length=len(text_content),
+    )
+    
+    # Trigger async processing (chunking + embedding)
+    await trigger_document_processing(source_id, doc.id)
     
     return FileUploadResponse(
         document_id=doc.id,
         filename=filename,
         size=file_size,
-        message="File uploaded successfully. It will be processed shortly.",
+        text_length=len(text_content),
+        message="File uploaded and parsed successfully. Chunking and embedding in progress.",
     )
 
 
@@ -597,7 +652,7 @@ async def upload_multiple_files(
     current_user: AdminUser = Depends(require_role(["admin", "operator"])),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload multiple files to a file_upload source."""
+    """Upload multiple files to a file_upload source. Parses content and triggers processing."""
     # Get source
     result = await db.execute(
         select(Source).where(Source.id == source_id)
@@ -628,6 +683,7 @@ async def upload_multiple_files(
     import uuid as uuid_mod
     uploaded = []
     errors = []
+    document_ids = []
     
     for file in files:
         filename = file.filename or "unknown"
@@ -637,23 +693,21 @@ async def upload_multiple_files(
             errors.append({"filename": filename, "error": f"File type {ext} not allowed"})
             continue
         
+        file_path = None
         try:
             unique_filename = f"{uuid_mod.uuid4()}{ext}"
             file_path = os.path.join(source_upload_dir, unique_filename)
             
-            file_size = 0
-            file_content = b""
-            async with aiofiles.open(file_path, 'wb') as f:
-                while chunk := await file.read(1024 * 1024):
-                    await f.write(chunk)
-                    file_content += chunk
-                    file_size += len(chunk)
+            # Read file content
+            file_content = await file.read()
+            file_size = len(file_content)
             
-            # Try to decode content as text
-            try:
-                text_content = file_content.decode('utf-8')
-            except UnicodeDecodeError:
-                text_content = f"[Binary file: {filename}]"
+            # Save file to disk
+            async with aiofiles.open(file_path, 'wb') as f:
+                await f.write(file_content)
+            
+            # Parse file to extract text
+            text_content = parse_file(file_content, filename)
             
             doc = Document(
                 source_id=source_id,
@@ -661,17 +715,33 @@ async def upload_multiple_files(
                 title=filename,
                 content=text_content,
                 url=file_path,
-                doc_metadata={"original_filename": filename, "size": file_size, "content_type": file.content_type or "application/octet-stream"},
+                doc_metadata={
+                    "original_filename": filename,
+                    "size": file_size,
+                    "text_length": len(text_content),
+                    "content_type": file.content_type or "application/octet-stream",
+                },
             )
             db.add(doc)
+            await db.flush()  # Get doc.id
             
             uploaded.append({
                 "document_id": str(doc.id),
                 "filename": filename,
                 "size": file_size,
+                "text_length": len(text_content),
             })
+            document_ids.append(doc.id)
+            
         except Exception as e:
+            logger.error("Failed to process file", filename=filename, error=str(e))
             errors.append({"filename": filename, "error": str(e)})
+            # Clean up file if it was saved
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
     
     if uploaded:
         # Update source document count
@@ -694,6 +764,10 @@ async def upload_multiple_files(
         db.add(audit)
         
         await db.commit()
+        
+        # Trigger processing for all uploaded documents
+        for doc_id in document_ids:
+            await trigger_document_processing(source_id, doc_id)
     
     return {
         "uploaded": uploaded,

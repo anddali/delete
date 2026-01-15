@@ -24,13 +24,13 @@ export default function LoginPage() {
 
     try {
       const response = await authApi.login(email, password);
-      
+
       // Store token first so the /me request can use it
       localStorage.setItem("access_token", response.access_token);
       if (response.refresh_token) {
         localStorage.setItem("refresh_token", response.refresh_token);
       }
-      
+
       const user = await authApi.me();
 
       login(user, response.access_token, response.refresh_token || "");

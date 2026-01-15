@@ -20,9 +20,14 @@ class EmbeddingService:
     """Service for generating embeddings using OpenAI API."""
     
     def __init__(self):
+        # Only pass organization if it's actually set (not placeholder)
+        org_id = settings.OPENAI_ORG_ID
+        if org_id and org_id.startswith("org-your"):
+            org_id = None  # Ignore placeholder value
+        
         self.client = AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
-            organization=settings.OPENAI_ORG_ID,
+            #organization=org_id if org_id else None,
         )
         self.model = settings.EMBEDDING_MODEL
         self.dimensions = settings.EMBEDDING_DIMENSIONS

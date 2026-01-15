@@ -102,7 +102,11 @@ export default function SourcesPage() {
       setIsUploadDialogOpen(false);
       setSelectedFiles([]);
       setUploadSourceId(null);
-      alert(`Uploaded ${data.total_uploaded} file(s) successfully!${data.total_errors > 0 ? ` (${data.total_errors} errors)` : ""}`);
+      alert(
+        `Uploaded ${data.total_uploaded} file(s) successfully!${
+          data.total_errors > 0 ? ` (${data.total_errors} errors)` : ""
+        }`
+      );
     },
     onError: (err: any) => {
       setUploadError(err.response?.data?.detail || "Failed to upload files");
@@ -273,7 +277,10 @@ export default function SourcesPage() {
                     id="description"
                     value={newSource.description}
                     onChange={(e) =>
-                      setNewSource({ ...newSource, description: e.target.value })
+                      setNewSource({
+                        ...newSource,
+                        description: e.target.value,
+                      })
                     }
                     placeholder="Brief description of this source"
                   />
@@ -318,7 +325,9 @@ export default function SourcesPage() {
                       />
                     </div>
                     <div className="grid gap-2">
-                      <Label htmlFor="confluence_username">Username/Email</Label>
+                      <Label htmlFor="confluence_username">
+                        Username/Email
+                      </Label>
                       <Input
                         id="confluence_username"
                         value={newSource.confluence_username}
@@ -521,7 +530,9 @@ export default function SourcesPage() {
                           size="sm"
                           variant="outline"
                           title="Upload Files"
-                          onClick={() => openUploadDialog(source.id, source.name)}
+                          onClick={() =>
+                            openUploadDialog(source.id, source.name)
+                          }
                         >
                           <Upload className="h-4 w-4" />
                         </Button>
@@ -578,7 +589,8 @@ export default function SourcesPage() {
                     colSpan={7}
                     className="text-center text-gray-400 py-8"
                   >
-                    No sources configured. Click &quot;Add Source&quot; to get started.
+                    No sources configured. Click &quot;Add Source&quot; to get
+                    started.
                   </TableCell>
                 </TableRow>
               )}
@@ -616,7 +628,8 @@ export default function SourcesPage() {
                   required
                 />
                 <p className="text-xs text-gray-500">
-                  Supported: .txt, .md, .pdf, .docx, .doc, .html, .json, .csv, .xml
+                  Supported: .txt, .md, .pdf, .docx, .doc, .html, .json, .csv,
+                  .xml
                 </p>
               </div>
 
@@ -652,11 +665,15 @@ export default function SourcesPage() {
               </Button>
               <Button
                 type="submit"
-                disabled={uploadMutation.isPending || selectedFiles.length === 0}
+                disabled={
+                  uploadMutation.isPending || selectedFiles.length === 0
+                }
               >
                 {uploadMutation.isPending
                   ? "Uploading..."
-                  : `Upload ${selectedFiles.length} File${selectedFiles.length !== 1 ? "s" : ""}`}
+                  : `Upload ${selectedFiles.length} File${
+                      selectedFiles.length !== 1 ? "s" : ""
+                    }`}
               </Button>
             </DialogFooter>
           </form>

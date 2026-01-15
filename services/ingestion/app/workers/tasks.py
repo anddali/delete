@@ -288,6 +288,104 @@ async def _update_job_failed(db, job: IngestionJob, error: str):
     logger.error("Ingestion failed", job_id=str(job.id), error=error)
 
 
+@celery_app.task(bind=True, base=CallbackTask)
+def process_uploaded_document(self, source_id: str, document_id: str):
+    """
+    Process a single uploaded document: chunk and generate embeddings.
+    
+    This is called after a file is uploaded via the Management API.
+    The document already has its content parsed and stored.
+    """
+    return run_async(_process_uploaded_document_async(source_id, document_id))
+
+
+async def _process_uploaded_document_async(source_id: str, document_id: str):
+    """Async implementation of single document processing."""
+    session_manager = DatabaseSessionManager()
+    session_manager.init(settings.DATABASE_URL)
+    
+    try:
+        async with session_manager.session() as db:
+            # Get document
+            doc = await db.get(Document, UUID(document_id))
+            if not doc:
+                logger.error("Document not found", document_id=document_id)
+                return {"success": False, "error": "Document not found"}
+            
+            # Get source for chunking config
+            source = await db.get(Source, UUID(source_id))
+            if not source:
+                logger.error("Source not found", source_id=source_id)
+                return {"success": False, "error": "Source not found"}
+            
+            # Get chunking config
+            chunking_config = get_chunking_config(source.config)
+            
+            # Delete existing chunks if any (re-processing)
+            await db.execute(
+                delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
+            )
+            
+            # Chunk the document content
+            chunks = chunk_document(
+                content=doc.content,
+                chunk_size_chars=chunking_config["chunk_size_chars"],
+                respect_boundaries=chunking_config["respect_boundaries"],
+                min_chunk_size_chars=chunking_config["min_chunk_size_chars"],
+                metadata={"source_id": source_id, "document_id": document_id},
+            )
+            
+            if not chunks:
+                logger.warning("No chunks created", document_id=document_id)
+                return {"success": True, "chunks_created": 0}
+            
+            # Generate embeddings in batch
+            chunk_texts = [c.content for c in chunks]
+            embeddings = await generate_embeddings(chunk_texts)
+            
+            # Create chunk records
+            for chunk, embedding in zip(chunks, embeddings):
+                chunk_record = DocumentChunk(
+                    document_id=doc.id,
+                    content=chunk.content,
+                    embedding=embedding,
+                    position=chunk.position,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    char_count=chunk.char_count,
+                    chunk_metadata=chunk.metadata,
+                )
+                db.add(chunk_record)
+            
+            # Update source chunk count
+            source.chunk_count = (source.chunk_count or 0) + len(chunks)
+            
+            await db.commit()
+            
+            logger.info(
+                "Document processed",
+                document_id=document_id,
+                chunks_created=len(chunks),
+            )
+            
+            return {
+                "success": True,
+                "document_id": document_id,
+                "chunks_created": len(chunks),
+            }
+    
+    except Exception as e:
+        logger.error(
+            "Failed to process document",
+            document_id=document_id,
+            error=str(e),
+        )
+        return {"success": False, "error": str(e)}
+    
+    finally:
+        await session_manager.close()
+
+
 @celery_app.task
 def scheduled_sync():
     """Find sources due for sync and trigger ingestion."""

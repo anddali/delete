@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str = ""  # Fernet key for credentials
     
     # Ingestion service
-    INGESTION_SERVICE_URL: str = "http://ingestion:8000"
+    INGESTION_SERVICE_URL: str = "http://ingestion-api:8000"
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]

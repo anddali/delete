@@ -144,6 +144,8 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://raguser:ragpassword@postgres:5432/ragdb
       - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_ORG_ID=${OPENAI_ORG_ID:-}
       - AWS_ACCESS_KEY_ID=minioadmin

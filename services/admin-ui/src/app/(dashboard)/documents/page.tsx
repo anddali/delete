@@ -350,9 +350,7 @@ export default function DocumentsPage() {
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Document Details</DialogTitle>
-            <DialogDescription>
-              {selectedDocument?.title}
-            </DialogDescription>
+            <DialogDescription>{selectedDocument?.title}</DialogDescription>
           </DialogHeader>
           {documentDetail && (
             <div className="space-y-4">
@@ -424,9 +422,7 @@ export default function DocumentsPage() {
                 >
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
-                      <Badge variant="outline">
-                        Position {chunk.position}
-                      </Badge>
+                      <Badge variant="outline">Position {chunk.position}</Badge>
                       <span className="text-xs text-gray-400">
                         chars {chunk.char_start}-{chunk.char_end} (
                         {chunk.char_count} chars)
