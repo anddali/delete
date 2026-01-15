@@ -1,0 +1,322 @@
+# docker-compose.dev.yml - Development Configuration
+# RAG Knowledge Indexing System
+
+services:
+  # PostgreSQL with pgvector for local development
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: rag-postgres-dev
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=raguser
+      - POSTGRES_PASSWORD=ragpassword
+      - POSTGRES_DB=ragdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data-dev:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - rag-network-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raguser -d ragdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and task queue
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis-dev
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data-dev:/data
+    networks:
+      - rag-network-dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # MinIO for S3-compatible local storage
+  minio:
+    image: minio/minio:latest
+    container_name: rag-minio-dev
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data-dev:/data
+    networks:
+      - rag-network-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Management API
+  management-api:
+    build:
+      context: ./services/management-api
+      dockerfile: Dockerfile.dev
+    container_name: rag-management-api-dev
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://raguser:ragpassword@postgres:5432/ragdb
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=dev-secret-key-change-in-production
+      - JWT_ALGORITHM=HS256
+      - ACCESS_TOKEN_EXPIRE_MINUTES=60
+      - REFRESH_TOKEN_EXPIRE_DAYS=7
+      - CREDENTIAL_ENCRYPTION_KEY=dev-encryption-key-32-chars!!
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ALLOWED_ORIGINS=http://localhost:3000
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=development
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./services/management-api/app:/app/app:ro
+      - ./services/shared:/app/shared:ro
+      - ./scripts:/app/scripts:ro
+      - ./alembic:/app/alembic:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rag-network-dev
+
+  # Query API
+  query-api:
+    build:
+      context: ./services/query-api
+      dockerfile: Dockerfile.dev
+    container_name: rag-query-api-dev
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://raguser:ragpassword@postgres:5432/ragdb
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QUERY_CACHE_TTL=900
+      - EMBEDDING_CACHE_TTL=3600
+      - TOKEN_CACHE_TTL=300
+      - SEARCH_TIMEOUT_SECONDS=5
+      - MAX_RESULTS_PER_QUERY=100
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=development
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./services/query-api/app:/app/app:ro
+      - ./services/shared:/app/shared:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rag-network-dev
+
+  # Ingestion API
+  ingestion-api:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile.dev
+    container_name: rag-ingestion-api-dev
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://raguser:ragpassword@postgres:5432/ragdb
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_ORG_ID=${OPENAI_ORG_ID:-}
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=rag-uploads
+      - CREDENTIAL_ENCRYPTION_KEY=dev-encryption-key-32-chars!!
+      - MAX_WORKERS=2
+      - BATCH_SIZE=50
+      - EMBEDDING_BATCH_SIZE=50
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=development
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./services/ingestion/app:/app/app:ro
+      - ./services/shared:/app/shared:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - rag-network-dev
+
+  # Celery worker for ingestion
+  ingestion-worker:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile.dev
+    container_name: rag-ingestion-worker-dev
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app worker --loglevel=debug --concurrency=2
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://raguser:ragpassword@postgres:5432/ragdb
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_ORG_ID=${OPENAI_ORG_ID:-}
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=rag-uploads
+      - CREDENTIAL_ENCRYPTION_KEY=dev-encryption-key-32-chars!!
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=development
+    volumes:
+      - ./services/ingestion/app:/app/app:ro
+      - ./services/shared:/app/shared:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rag-network-dev
+
+  # Celery beat for scheduled tasks
+  ingestion-beat:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile.dev
+    container_name: rag-ingestion-beat-dev
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app beat --loglevel=debug
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://raguser:ragpassword@postgres:5432/ragdb
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=development
+    volumes:
+      - ./services/ingestion/app:/app/app:ro
+      - ./services/shared:/app/shared:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - rag-network-dev
+
+  # Admin UI
+  admin-ui:
+    build:
+      context: ./services/admin-ui
+      dockerfile: Dockerfile.dev
+    container_name: rag-admin-ui-dev
+    restart: unless-stopped
+    command: npm run dev
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8001
+      - NEXT_PUBLIC_QUERY_API_URL=http://localhost:8002
+      - NEXT_PUBLIC_APP_NAME=RAG Knowledge Admin (Dev)
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./services/admin-ui/src:/app/src:ro
+      - ./services/admin-ui/public:/app/public:ro
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - rag-network-dev
+
+  # pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: rag-pgadmin-dev
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@localhost.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin-data-dev:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    networks:
+      - rag-network-dev
+    profiles:
+      - tools
+
+  # Redis Commander for Redis management
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: rag-redis-commander-dev
+    restart: unless-stopped
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - rag-network-dev
+    profiles:
+      - tools
+
+  # Flower for Celery monitoring
+  flower:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile.dev
+    container_name: rag-flower-dev
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app flower --port=5555
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    networks:
+      - rag-network-dev
+    profiles:
+      - tools
+
+volumes:
+  postgres-data-dev:
+    driver: local
+  redis-data-dev:
+    driver: local
+  minio-data-dev:
+    driver: local
+  pgadmin-data-dev:
+    driver: local
+
+networks:
+  rag-network-dev:
+    driver: bridge

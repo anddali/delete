@@ -1,0 +1,21 @@
+# Development Dockerfile for Admin UI
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package.json package-lock.json* ./
+RUN npm install
+
+# Copy source code
+COPY . .
+
+# Expose development port
+EXPOSE 3000
+
+# Environment variables
+ENV NODE_ENV=development
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Start development server with hot reload
+CMD ["npm", "run", "dev"]

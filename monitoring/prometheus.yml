@@ -1,0 +1,51 @@
+# Prometheus configuration for RAG Knowledge Indexing System
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Management API metrics
+  - job_name: "management-api"
+    static_configs:
+      - targets: ["management-api:8000"]
+    metrics_path: "/metrics"
+    scheme: http
+
+  # Query API metrics
+  - job_name: "query-api"
+    static_configs:
+      - targets: ["query-api:8000"]
+    metrics_path: "/metrics"
+    scheme: http
+
+  # Ingestion API metrics
+  - job_name: "ingestion-api"
+    static_configs:
+      - targets: ["ingestion-api:8000"]
+    metrics_path: "/metrics"
+    scheme: http
+
+  # Redis metrics (requires redis_exporter)
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis-exporter:9121']
+
+  # Nginx metrics
+  - job_name: "nginx"
+    static_configs:
+      - targets: ["nginx:80"]
+    metrics_path: "/nginx_status"
+    scheme: http
