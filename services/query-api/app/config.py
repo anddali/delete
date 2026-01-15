@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     MAX_RESULTS: int = 20
     DEFAULT_SLIDING_WINDOW: int = 1
     MAX_SLIDING_WINDOW: int = 3
-    MIN_SIMILARITY_THRESHOLD: float = 0.5
+    MIN_SIMILARITY_THRESHOLD: float = 0.1  # Lowered to allow more matches
     
     # Cache settings
     CACHE_ENABLED: bool = True

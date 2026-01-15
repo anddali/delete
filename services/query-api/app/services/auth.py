@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from shared.database.connection import get_db_session
+from shared.database.connection import session_manager
 from shared.database.models import APIToken, TokenScope
 
 logger = structlog.get_logger()
@@ -50,11 +50,11 @@ async def get_api_token(
     # Hash the token to find in database
     token_hash = hashlib.sha256(x_api_key.encode()).hexdigest()
     
-    async with get_db_session() as db:
+    async with session_manager.session() as db:
         # Find token
         result = await db.execute(
             select(APIToken)
-            .options(selectinload(APIToken.scopes))
+            .options(selectinload(APIToken.token_scopes))
             .where(
                 APIToken.token_hash == token_hash,
                 APIToken.is_active == True,
@@ -83,8 +83,8 @@ async def get_api_token(
         
         # Get source IDs from scopes
         source_ids = None
-        if token.scopes:
-            source_ids = [scope.source_id for scope in token.scopes]
+        if token.token_scopes:
+            source_ids = [scope.source_id for scope in token.token_scopes]
         
         return TokenData(
             token_id=token.id,

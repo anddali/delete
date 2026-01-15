@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from shared.database.models import Document, DocumentChunk, Source
+from shared.database.connection import session_manager
 
 logger = structlog.get_logger()
 
@@ -53,12 +54,22 @@ class SearchService:
         Returns:
             List of search results with extended context
         """
+        logger.info("SearchService.search() called",
+            query=query[:50] if len(query) > 50 else query,
+            sliding_window=sliding_window,
+            limit=limit,
+            source_ids=[str(s) for s in source_ids] if source_ids else None,
+            min_similarity=min_similarity
+        )
+        
         # Generate query embedding
         embedding = await self._generate_embedding(query)
         
         if not embedding:
-            logger.error("Failed to generate query embedding")
+            logger.error("Failed to generate query embedding - returning empty")
             return []
+        
+        logger.info("Embedding generated successfully", embedding_len=len(embedding))
         
         # Use the database function for sliding window search
         results = await self._search_with_sliding_window(
@@ -70,19 +81,26 @@ class SearchService:
             min_similarity=min_similarity,
         )
         
+        logger.info("Raw search results from DB", raw_result_count=len(results))
+        
         # Format results with extended content
         formatted = await self._format_results(results, include_metadata)
+        
+        logger.info("Formatted results", formatted_count=len(formatted))
         
         return formatted
     
     async def _generate_embedding(self, text: str) -> Optional[List[float]]:
         """Generate embedding for query text."""
         try:
+            logger.info("Generating embedding", text_len=len(text), model=settings.OPENAI_EMBEDDING_MODEL)
             response = await self._openai.embeddings.create(
                 model=settings.OPENAI_EMBEDDING_MODEL,
                 input=text,
             )
-            return response.data[0].embedding
+            embedding = response.data[0].embedding
+            logger.info("Embedding generated", embedding_len=len(embedding))
+            return embedding
         
         except Exception as e:
             logger.error("Embedding generation failed", error=str(e))
@@ -108,23 +126,20 @@ class SearchService:
         
         # Build source filter
         source_filter = ""
-        params = {
-            "embedding": embedding_str,
-            "limit": limit,
-            "min_similarity": min_similarity,
-        }
         
         if source_ids:
-            source_filter += " AND d.source_id = ANY(:source_ids)"
-            params["source_ids"] = [str(s) for s in source_ids]
+            # Format UUIDs as PostgreSQL array literal
+            uuid_list = ",".join(f"'{str(s)}'" for s in source_ids)
+            source_filter += f" AND d.source_id IN ({uuid_list})"
         
         if source_types:
-            source_filter += " AND s.type = ANY(:source_types)"
-            params["source_types"] = source_types
+            type_list = ",".join(f"'{t}'" for t in source_types)
+            source_filter += f" AND s.type IN ({type_list})"
         
         # Main similarity search query
         # This finds the best matching chunks
-        query = text(f"""
+        # Building complete SQL with embedded embedding to avoid parameter binding issues
+        sql_str = f"""
             SELECT 
                 c.id AS chunk_id,
                 c.document_id,
@@ -141,19 +156,59 @@ class SearchService:
                 s.id AS source_id,
                 s.name AS source_name,
                 s.type AS source_type,
-                1 - (c.embedding <=> :embedding::vector) AS similarity
+                (1 - (c.embedding <=> '{embedding_str}'::vector)) AS similarity
             FROM document_chunks c
             JOIN documents d ON c.document_id = d.id
             JOIN sources s ON d.source_id = s.id
             WHERE s.is_active = true
-                AND 1 - (c.embedding <=> :embedding::vector) >= :min_similarity
+                AND (1 - (c.embedding <=> '{embedding_str}'::vector)) >= {min_similarity}
                 {source_filter}
-            ORDER BY c.embedding <=> :embedding::vector
-            LIMIT :limit
-        """)
+            ORDER BY c.embedding <=> '{embedding_str}'::vector
+            LIMIT {limit}
+        """
+        query = text(sql_str)
         
-        result = await self.db.execute(query, params)
-        rows = result.mappings().all()
+        # Log the actual SQL (truncated embedding for readability)
+        sql_preview = f"""
+            SELECT c.id, c.content, similarity
+            FROM document_chunks c JOIN documents d ON c.document_id = d.id JOIN sources s ON d.source_id = s.id
+            WHERE s.is_active = true AND similarity >= {min_similarity} {source_filter}
+            ORDER BY similarity DESC LIMIT {limit}
+        """
+        logger.info("Executing SQL", sql_len=len(sql_str))
+        
+        logger.info("Executing search", 
+            min_similarity=min_similarity, 
+            limit=limit,
+            source_filter=source_filter,
+            embedding_len=len(embedding),
+            embedding_sample=embedding_str[:80]
+        )
+        
+        try:
+            # Use session_manager directly for a fresh connection
+            # This fixes issues with the dependency-injected db session
+            logger.info("About to execute query with session_manager")
+            async with session_manager.session() as session:
+                logger.info("Got session, executing query")
+                result = await session.execute(query)
+                logger.info("Query executed, fetching rows")
+                rows = result.mappings().all()
+                logger.info("Rows fetched", row_count=len(rows))
+            logger.info("Query executed successfully", row_count=len(rows))
+            if rows:
+                logger.info("First row sample", 
+                    chunk_id=str(rows[0].get('chunk_id')),
+                    similarity=rows[0].get('similarity'),
+                    content_preview=str(rows[0].get('content', ''))[:50]
+                )
+        except Exception as e:
+            logger.error("Search query failed", error=str(e), error_type=type(e).__name__)
+            import traceback
+            logger.error("Full traceback", tb=traceback.format_exc())
+            rows = []
+        
+        logger.info("Search results", row_count=len(rows))
         
         # For each match, get adjacent chunks for sliding window
         results_with_context = []
@@ -198,11 +253,12 @@ class SearchService:
                 FROM document_chunks
                 WHERE document_id = :doc_id AND position = :position
             """)
-            result = await self.db.execute(query, {
-                "doc_id": str(document_id),
-                "position": match_position,
-            })
-            rows = result.mappings().all()
+            async with session_manager.session() as session:
+                result = await session.execute(query, {
+                    "doc_id": str(document_id),
+                    "position": match_position,
+                })
+                rows = result.mappings().all()
             
             return [
                 {
@@ -230,12 +286,13 @@ class SearchService:
             ORDER BY position
         """)
         
-        result = await self.db.execute(query, {
-            "doc_id": str(document_id),
-            "min_pos": min_pos,
-            "max_pos": max_pos,
-        })
-        rows = result.mappings().all()
+        async with session_manager.session() as session:
+            result = await session.execute(query, {
+                "doc_id": str(document_id),
+                "min_pos": min_pos,
+                "max_pos": max_pos,
+            })
+            rows = result.mappings().all()
         
         return [
             {

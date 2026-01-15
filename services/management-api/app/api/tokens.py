@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 from app.services.auth import get_current_user, require_role, AdminUser
 from shared.database.connection import get_db
 from shared.database.models import APIToken, TokenScope, Source, AuditLog
-from shared.utils.security import generate_api_key, hash_token
+from shared.utils.security import generate_api_key
 
 logger = structlog.get_logger()
 
@@ -63,7 +63,7 @@ class TokenResponse(BaseModel):
     id: UUID
     name: str
     description: Optional[str]
-    token_prefix: str
+    token_preview: str
     is_active: bool
     rate_limit: Optional[int]
     expires_at: Optional[datetime]
@@ -88,7 +88,7 @@ async def list_tokens(
     db: AsyncSession = Depends(get_db),
 ):
     """List all API tokens."""
-    query = select(APIToken).options(selectinload(APIToken.scopes))
+    query = select(APIToken).options(selectinload(APIToken.token_scopes))
     
     if is_active is not None:
         query = query.where(APIToken.is_active == is_active)
@@ -103,13 +103,13 @@ async def list_tokens(
             id=t.id,
             name=t.name,
             description=t.description,
-            token_prefix=t.token_prefix,
+            token_preview=t.token_preview,
             is_active=t.is_active,
-            rate_limit=t.rate_limit,
+            rate_limit=t.rate_limit.get("requests_per_minute") if t.rate_limit else None,
             expires_at=t.expires_at,
             last_used_at=t.last_used_at,
             created_at=t.created_at,
-            source_ids=[s.source_id for s in t.scopes],
+            source_ids=[s.source_id for s in t.token_scopes],
         )
         for t in tokens
     ]
@@ -136,10 +136,8 @@ async def create_token(
                 detail=f"Invalid source IDs: {missing}",
             )
     
-    # Generate token
-    raw_token = generate_api_key()
-    token_hash = hash_token(raw_token)
-    token_prefix = raw_token[:8]
+    # Generate token - returns (raw_token, token_hash, token_prefix)
+    raw_token, token_hash, token_prefix = generate_api_key()
     
     # Calculate expiration
     expires_at = None
@@ -150,10 +148,11 @@ async def create_token(
     token = APIToken(
         name=request.name,
         description=request.description,
+        type="query",
         token_hash=token_hash,
-        token_prefix=token_prefix,
+        token_preview=token_prefix,
         is_active=True,
-        rate_limit=request.rate_limit,
+        rate_limit={"requests_per_minute": request.rate_limit} if request.rate_limit else None,
         expires_at=expires_at,
     )
     db.add(token)
@@ -163,7 +162,7 @@ async def create_token(
     source_ids = request.source_ids or []
     for source_id in source_ids:
         scope = TokenScope(
-            api_token_id=token.id,
+            token_id=token.id,
             source_id=source_id,
         )
         db.add(scope)
@@ -187,10 +186,10 @@ async def create_token(
         id=token.id,
         name=token.name,
         description=token.description,
-        token_prefix=token_prefix,
+        token_preview=token_prefix,
         token=raw_token,
         is_active=token.is_active,
-        rate_limit=token.rate_limit,
+        rate_limit=request.rate_limit,
         expires_at=token.expires_at,
         last_used_at=None,
         created_at=token.created_at,
@@ -207,7 +206,7 @@ async def get_token(
     """Get token details."""
     result = await db.execute(
         select(APIToken)
-        .options(selectinload(APIToken.scopes))
+        .options(selectinload(APIToken.token_scopes))
         .where(APIToken.id == token_id)
     )
     token = result.scalar_one_or_none()
@@ -222,13 +221,13 @@ async def get_token(
         id=token.id,
         name=token.name,
         description=token.description,
-        token_prefix=token.token_prefix,
+        token_preview=token.token_preview,
         is_active=token.is_active,
-        rate_limit=token.rate_limit,
+        rate_limit=token.rate_limit.get("requests_per_minute") if token.rate_limit else None,
         expires_at=token.expires_at,
         last_used_at=token.last_used_at,
         created_at=token.created_at,
-        source_ids=[s.source_id for s in token.scopes],
+        source_ids=[s.source_id for s in token.token_scopes],
     )
 
 
@@ -242,7 +241,7 @@ async def update_token(
     """Update token."""
     result = await db.execute(
         select(APIToken)
-        .options(selectinload(APIToken.scopes))
+        .options(selectinload(APIToken.token_scopes))
         .where(APIToken.id == token_id)
     )
     token = result.scalar_one_or_none()
@@ -270,13 +269,13 @@ async def update_token(
     if request.source_ids is not None:
         # Delete existing scopes
         await db.execute(
-            delete(TokenScope).where(TokenScope.api_token_id == token.id)
+            delete(TokenScope).where(TokenScope.token_id == token.id)
         )
         
         # Create new scopes
         for source_id in request.source_ids:
             scope = TokenScope(
-                api_token_id=token.id,
+                token_id=token.id,
                 source_id=source_id,
             )
             db.add(scope)
@@ -297,7 +296,7 @@ async def update_token(
     # Refresh to get updated scopes
     result = await db.execute(
         select(APIToken)
-        .options(selectinload(APIToken.scopes))
+        .options(selectinload(APIToken.token_scopes))
         .where(APIToken.id == token_id)
     )
     token = result.scalar_one()
@@ -308,13 +307,13 @@ async def update_token(
         id=token.id,
         name=token.name,
         description=token.description,
-        token_prefix=token.token_prefix,
+        token_preview=token.token_preview,
         is_active=token.is_active,
-        rate_limit=token.rate_limit,
+        rate_limit=token.rate_limit.get("requests_per_minute") if token.rate_limit else None,
         expires_at=token.expires_at,
         last_used_at=token.last_used_at,
         created_at=token.created_at,
-        source_ids=[s.source_id for s in token.scopes],
+        source_ids=[s.source_id for s in token.token_scopes],
     )
 
 
@@ -338,7 +337,7 @@ async def revoke_token(
     
     # Delete scopes first
     await db.execute(
-        delete(TokenScope).where(TokenScope.api_token_id == token_id)
+        delete(TokenScope).where(TokenScope.token_id == token_id)
     )
     
     # Delete token

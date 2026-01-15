@@ -133,36 +133,64 @@ async def search(
     - 2: 2 chunks before + match + 2 chunks after
     - 3: 3 chunks before + match + 3 chunks after
     """
+    logger.info("=== SEARCH REQUEST START ===")
+    logger.info("Request params", 
+        query=request.query,
+        sliding_window=request.sliding_window,
+        limit=request.limit,
+        source_ids=request.source_ids,
+        min_similarity=request.min_similarity
+    )
+    logger.info("Token info",
+        token_id=str(token.token_id),
+        token_source_ids=[str(s) for s in (token.source_ids or [])]
+    )
+    
     start_time = time.time()
     
     # Check cache
     cache_key = _build_cache_key(request, token.source_ids)
+    logger.info("Cache check", cache_key=cache_key, cache_enabled=settings.CACHE_ENABLED)
     if settings.CACHE_ENABLED:
         cached = await cache_service.get(cache_key)
         if cached:
+            logger.info("Cache HIT - returning cached result")
             cached["cached"] = True
             cached["search_time_ms"] = (time.time() - start_time) * 1000
             return SearchResponse(**cached)
+    logger.info("Cache MISS - proceeding with search")
     
     # Resolve source IDs from token scopes
     allowed_source_ids = token.source_ids
+    logger.info("Allowed source IDs from token", allowed_source_ids=[str(s) for s in (allowed_source_ids or [])])
     
     # Apply request filters
     filter_source_ids = None
     if request.source_ids:
+        logger.info("Request has source_ids filter")
         # Intersect with allowed sources
         if allowed_source_ids:
             filter_source_ids = [
                 sid for sid in request.source_ids
                 if str(sid) in [str(a) for a in allowed_source_ids]
             ]
+            logger.info("Intersected with allowed", filter_source_ids=[str(s) for s in filter_source_ids])
         else:
             filter_source_ids = request.source_ids
+            logger.info("No token scope restriction, using request source_ids")
     elif allowed_source_ids:
         filter_source_ids = allowed_source_ids
+        logger.info("Using token scope source_ids", filter_source_ids=[str(s) for s in filter_source_ids])
+    else:
+        logger.info("No source filter applied - searching all sources")
+    
+    logger.info("Final filter_source_ids", 
+        filter_source_ids=[str(s) for s in filter_source_ids] if filter_source_ids else None
+    )
     
     # Perform search
     search_service = SearchService(db)
+    logger.info("Calling search_service.search...")
     
     results = await search_service.search(
         query=request.query,
@@ -173,6 +201,8 @@ async def search(
         min_similarity=request.min_similarity,
         include_metadata=request.include_metadata,
     )
+    
+    logger.info("Search complete", result_count=len(results))
     
     search_time_ms = (time.time() - start_time) * 1000
     
@@ -195,6 +225,7 @@ async def search(
     # Log query
     await _log_query(db, token, request, len(results), search_time_ms)
     
+    logger.info("=== SEARCH REQUEST END ===", total_results=len(results), time_ms=search_time_ms)
     return SearchResponse(**response_data)
 
 

@@ -2,10 +2,12 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { tokensApi } from "@/lib/api";
+import { tokensApi, sourcesApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -16,11 +18,21 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatDate } from "@/lib/utils";
-import { Plus, Trash2, Copy, Check } from "lucide-react";
+import { Plus, Trash2, Copy, Check, Key, Database } from "lucide-react";
+
+interface TokenCreateData {
+  name: string;
+  source_ids?: string[];
+  expires_in_days?: number;
+  rate_limit?: number;
+}
 
 export default function TokensPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newTokenName, setNewTokenName] = useState("");
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [expiresInDays, setExpiresInDays] = useState<string>("");
+  const [rateLimit, setRateLimit] = useState<string>("100");
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -31,11 +43,20 @@ export default function TokensPage() {
     queryFn: tokensApi.list,
   });
 
+  const { data: sources } = useQuery({
+    queryKey: ["sources"],
+    queryFn: sourcesApi.list,
+  });
+
   const createMutation = useMutation({
-    mutationFn: (name: string) => tokensApi.create({ name }),
+    mutationFn: (data: TokenCreateData) => tokensApi.create(data),
     onSuccess: (data) => {
       setCreatedToken(data.token);
       setNewTokenName("");
+      setSelectedSources([]);
+      setExpiresInDays("");
+      setRateLimit("100");
+      setShowCreate(false);
       queryClient.invalidateQueries({ queryKey: ["tokens"] });
     },
   });
@@ -55,6 +76,31 @@ export default function TokensPage() {
     }
   };
 
+  const handleSourceToggle = (sourceId: string) => {
+    setSelectedSources((prev) =>
+      prev.includes(sourceId)
+        ? prev.filter((id) => id !== sourceId)
+        : [...prev, sourceId]
+    );
+  };
+
+  const handleCreate = () => {
+    const data: TokenCreateData = {
+      name: newTokenName,
+      rate_limit: parseInt(rateLimit) || 100,
+    };
+    
+    if (selectedSources.length > 0) {
+      data.source_ids = selectedSources;
+    }
+    
+    if (expiresInDays && parseInt(expiresInDays) > 0) {
+      data.expires_in_days = parseInt(expiresInDays);
+    }
+    
+    createMutation.mutate(data);
+  };
+
   if (isLoading) {
     return <div>Loading...</div>;
   }
@@ -62,7 +108,10 @@ export default function TokensPage() {
   return (
     <div>
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-3xl font-bold">API Tokens</h1>
+        <div>
+          <h1 className="text-3xl font-bold">API Tokens</h1>
+          <p className="text-muted-foreground">Manage API tokens for query access</p>
+        </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="mr-2 h-4 w-4" />
           Create Token
@@ -73,22 +122,112 @@ export default function TokensPage() {
       {showCreate && (
         <Card className="mb-6">
           <CardHeader>
-            <CardTitle>Create New Token</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              <Key className="h-5 w-5" />
+              Create New API Token
+            </CardTitle>
+            <CardDescription>
+              Tokens are used to authenticate API requests. You can scope tokens to specific sources.
+            </CardDescription>
           </CardHeader>
-          <CardContent>
-            <div className="flex gap-4">
+          <CardContent className="space-y-6">
+            {/* Token Name */}
+            <div className="space-y-2">
+              <Label htmlFor="token-name">Token Name *</Label>
               <Input
-                placeholder="Token name"
+                id="token-name"
+                placeholder="e.g., Production API, Mobile App"
                 value={newTokenName}
                 onChange={(e) => setNewTokenName(e.target.value)}
               />
+            </div>
+
+            {/* Source Scoping */}
+            <div className="space-y-3">
+              <Label className="flex items-center gap-2">
+                <Database className="h-4 w-4" />
+                Source Access
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                Select which sources this token can query. Leave empty to allow access to all sources.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-48 overflow-y-auto p-2 border rounded-md">
+                {sources?.map((source: any) => (
+                  <div
+                    key={source.id}
+                    className="flex items-center space-x-2 p-2 rounded hover:bg-muted"
+                  >
+                    <Checkbox
+                      id={`source-${source.id}`}
+                      checked={selectedSources.includes(source.id)}
+                      onCheckedChange={() => handleSourceToggle(source.id)}
+                    />
+                    <label
+                      htmlFor={`source-${source.id}`}
+                      className="text-sm font-medium leading-none cursor-pointer flex-1"
+                    >
+                      {source.name}
+                      <span className="block text-xs text-muted-foreground">
+                        {source.type}
+                      </span>
+                    </label>
+                  </div>
+                ))}
+                {(!sources || sources.length === 0) && (
+                  <p className="text-sm text-muted-foreground col-span-full text-center py-4">
+                    No sources available
+                  </p>
+                )}
+              </div>
+              {selectedSources.length > 0 && (
+                <p className="text-sm text-muted-foreground">
+                  {selectedSources.length} source(s) selected
+                </p>
+              )}
+            </div>
+
+            {/* Rate Limit & Expiration */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="rate-limit">Rate Limit (requests/min)</Label>
+                <Input
+                  id="rate-limit"
+                  type="number"
+                  min="1"
+                  max="10000"
+                  value={rateLimit}
+                  onChange={(e) => setRateLimit(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="expires">Expires In (days)</Label>
+                <Input
+                  id="expires"
+                  type="number"
+                  min="1"
+                  max="365"
+                  placeholder="Never"
+                  value={expiresInDays}
+                  onChange={(e) => setExpiresInDays(e.target.value)}
+                />
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-4 pt-4">
               <Button
-                onClick={() => createMutation.mutate(newTokenName)}
+                onClick={handleCreate}
                 disabled={!newTokenName || createMutation.isPending}
               >
-                Create
+                {createMutation.isPending ? "Creating..." : "Create Token"}
               </Button>
-              <Button variant="outline" onClick={() => setShowCreate(false)}>
+              <Button variant="outline" onClick={() => {
+                setShowCreate(false);
+                setNewTokenName("");
+                setSelectedSources([]);
+                setExpiresInDays("");
+                setRateLimit("100");
+              }}>
                 Cancel
               </Button>
             </div>
@@ -140,11 +279,11 @@ export default function TokensPage() {
               <TableRow>
                 <TableHead>Name</TableHead>
                 <TableHead>Prefix</TableHead>
+                <TableHead>Scope</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Rate Limit</TableHead>
                 <TableHead>Expires</TableHead>
                 <TableHead>Last Used</TableHead>
-                <TableHead>Created</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
@@ -153,7 +292,16 @@ export default function TokensPage() {
                 <TableRow key={token.id}>
                   <TableCell className="font-medium">{token.name}</TableCell>
                   <TableCell>
-                    <code className="text-sm">{token.token_prefix}...</code>
+                    <code className="text-sm">{token.token_preview}...</code>
+                  </TableCell>
+                  <TableCell>
+                    {token.source_ids?.length > 0 ? (
+                      <Badge variant="outline" className="font-normal">
+                        {token.source_ids.length} source(s)
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary">All sources</Badge>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Badge
@@ -171,7 +319,6 @@ export default function TokensPage() {
                       ? formatDate(token.last_used_at)
                       : "Never"}
                   </TableCell>
-                  <TableCell>{formatDate(token.created_at)}</TableCell>
                   <TableCell>
                     <Button
                       size="sm"
